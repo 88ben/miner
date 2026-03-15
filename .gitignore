@@ -1,0 +1,38 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Node / Frontend
+ui/node_modules/
+ui/dist/
+ui/dist-ssr/
+*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Runtime config (contains wallet addresses / credentials)
+config.json
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
