@@ -35,3 +35,9 @@ pub struct MiningJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Nonce(pub u64);
+
+#[derive(Debug, Clone)]
+pub struct FoundNonce {
+    pub nonce: u64,
+    pub hash: Vec<u8>,
+}

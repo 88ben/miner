@@ -21,3 +21,7 @@ miner-core = { path = "crates/core" }
 miner-stratum = { path = "crates/stratum" }
 miner-worker = { path = "crates/worker" }
 miner-api = { path = "crates/api" }
+miner-hashers = { path = "crates/hashers" }
+
+[patch.crates-io]
+hasherkawpow-sys = { path = "patches/hasherkawpow-sys" }

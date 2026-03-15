@@ -27,6 +27,12 @@ config.json
 Thumbs.db
 Desktop.ini
 
+# Crates.io registry metadata in local patches
+patches/**/.cargo-ok
+patches/**/.cargo_vcs_info.json
+patches/**/Cargo.toml.orig
+patches/**/Cargo.lock
+
 # Editors
 .vscode/*
 !.vscode/extensions.json

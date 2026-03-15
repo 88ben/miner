@@ -1,0 +1,33 @@
+[package]
+name = "miner-hashers"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["randomx", "ethash", "kawpow", "kheavyhash", "equihash"]
+randomx = ["dep:randomx-rs"]
+ethash = ["dep:sha3", "dep:byteorder"]
+kawpow = ["dep:hasherkawpow-sys"]
+kheavyhash = ["dep:sha3"]
+equihash = ["dep:equihash-crate"]
+cuda = ["dep:cudarc"]
+
+[dependencies]
+miner-core = { workspace = true }
+tracing = { workspace = true }
+
+# RandomX (Monero) - C FFI bindings
+randomx-rs = { version = "1", optional = true }
+
+# Ethash/ETCHash - we implement from scratch with keccak
+sha3 = { version = "0.10", optional = true }
+byteorder = { version = "1", optional = true }
+
+# KawPow (Ravencoin) - C FFI bindings
+hasherkawpow-sys = { version = "0.1", optional = true }
+
+# Equihash (Zcash) - with tromp C++ solver
+equihash-crate = { package = "equihash", version = "0.2", features = ["solver"], optional = true }
+
+# CUDA GPU support
+cudarc = { version = "0.12", optional = true }

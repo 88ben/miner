@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 miner-core = { workspace = true }
 miner-stratum = { workspace = true }
+miner-hashers = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -13,3 +14,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+hex = "0.4"
