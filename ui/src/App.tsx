@@ -1,21 +1,58 @@
-import { useEffect, useState } from "react";
-import { fetchCoins, fetchStats, stopAllWorkers } from "./api";
+import { useEffect, useState, useCallback } from "react";
+import {
+  fetchCoins,
+  fetchConfig,
+  fetchStats,
+  fetchWorkerStatus,
+  startWorker,
+  stopWorker,
+  stopAllWorkers,
+  updateCoinEntry,
+} from "./api";
 import { CoinBadge } from "./components/CoinBadge";
+import { EditWorkerDialog } from "./components/EditWorkerDialog";
+import type { PowerState } from "./components/PowerButton";
 import { StatCard } from "./components/StatCard";
 import { WorkerRow } from "./components/WorkerRow";
-import type { Coin, StatsSnapshot } from "./types";
+import type { Coin, CoinEntry, MinerConfig, StatsSnapshot } from "./types";
 import { formatHashrate } from "./utils";
 
 const POLL_INTERVAL = 2000;
 
+function isCoinConfigured(coin: CoinEntry): boolean {
+  return (
+    coin.wallet.length > 0 &&
+    !coin.wallet.startsWith("YOUR_") &&
+    coin.pool.url.length > 0 &&
+    coin.pool.port > 0
+  );
+}
+
 export default function App() {
   const [stats, setStats] = useState<StatsSnapshot[]>([]);
   const [coins, setCoins] = useState<Coin[]>([]);
+  const [config, setConfig] = useState<MinerConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+
+  const [workerStatus, setWorkerStatus] = useState<Record<string, boolean>>({});
+  const [powerStates, setPowerStates] = useState<Record<number, PowerState>>({});
+  const [powerErrors, setPowerErrors] = useState<Record<number, string>>({});
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const status = await fetchWorkerStatus();
+      setWorkerStatus(status);
+    } catch {
+      // silently ignore — we'll retry on next poll
+    }
+  }, []);
 
   useEffect(() => {
     fetchCoins().then(setCoins).catch(() => {});
+    fetchConfig().then(setConfig).catch(() => {});
+    refreshStatus();
 
     const poll = () => {
       fetchStats()
@@ -24,12 +61,14 @@ export default function App() {
           setError(null);
         })
         .catch(() => setError("Cannot reach miner API"));
+
+      refreshStatus();
     };
 
     poll();
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => clearInterval(interval);
-  }, []);
+  }, [refreshStatus]);
 
   const totalHashrate = stats.reduce((sum, s) => sum + s.hashrate, 0);
   const totalAccepted = stats.reduce((sum, s) => sum + s.accepted_shares, 0);
@@ -39,9 +78,89 @@ export default function App() {
     setStopping(true);
     try {
       await stopAllWorkers();
+      await refreshStatus();
     } finally {
       setStopping(false);
     }
+  };
+
+  const handleSave = async (index: number, entry: CoinEntry) => {
+    try {
+      const updated = await updateCoinEntry(index, entry);
+      setConfig(updated);
+      setEditIndex(null);
+    } catch {
+      alert("Failed to save config. Check the backend logs.");
+    }
+  };
+
+  const handleToggle = async (index: number, coin: CoinEntry) => {
+    const running = workerStatus[coin.symbol] ?? false;
+
+    if (running) {
+      setPowerStates((p) => ({ ...p, [index]: "loading" }));
+      try {
+        await stopWorker(index);
+        await refreshStatus();
+        setPowerStates((p) => ({ ...p, [index]: "off" }));
+        setPowerErrors((e) => {
+          const copy = { ...e };
+          delete copy[index];
+          return copy;
+        });
+      } catch (err) {
+        setPowerStates((p) => ({ ...p, [index]: "error" }));
+        setPowerErrors((e) => ({
+          ...e,
+          [index]: err instanceof Error ? err.message : "Failed to stop worker",
+        }));
+      }
+    } else {
+      setPowerStates((p) => ({ ...p, [index]: "loading" }));
+      try {
+        const res = await startWorker(index);
+        await refreshStatus();
+        if (res.ok) {
+          setPowerStates((p) => ({ ...p, [index]: "on" }));
+          setPowerErrors((e) => {
+            const copy = { ...e };
+            delete copy[index];
+            return copy;
+          });
+        } else {
+          setPowerStates((p) => ({ ...p, [index]: "error" }));
+          setPowerErrors((e) => ({
+            ...e,
+            [index]: res.error || "Unknown error",
+          }));
+        }
+      } catch (err) {
+        setPowerStates((p) => ({ ...p, [index]: "error" }));
+        setPowerErrors((e) => ({
+          ...e,
+          [index]: err instanceof Error ? err.message : "Failed to start worker",
+        }));
+      }
+    }
+  };
+
+  const findStatsForCoin = (coin: CoinEntry): StatsSnapshot | undefined => {
+    return stats.find(
+      (s) => s.algorithm.toLowerCase() === coin.algorithm.toLowerCase()
+    );
+  };
+
+  const resolvePowerState = (index: number, coin: CoinEntry): PowerState => {
+    const override = powerStates[index];
+    if (override === "loading") return "loading";
+
+    if (!isCoinConfigured(coin)) return "disabled";
+
+    const running = workerStatus[coin.symbol] ?? false;
+
+    if (override === "error") return "error";
+
+    return running ? "on" : "off";
   };
 
   return (
@@ -49,7 +168,9 @@ export default function App() {
       {/* Header */}
       <header className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Miner Dashboard</h1>
+          <h1 className="text-3xl font-bold tracking-tight">
+            Miner Dashboard
+          </h1>
           <p className="text-[var(--color-text-secondary)] text-sm mt-1">
             Multi-cryptocurrency mining engine
           </p>
@@ -71,7 +192,7 @@ export default function App() {
       )}
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 mb-8">
         <StatCard
           label="Total Hashrate"
           value={formatHashrate(totalHashrate)}
@@ -107,23 +228,38 @@ export default function App() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[var(--color-text-secondary)] text-xs uppercase tracking-wider">
-                <th className="py-3 px-4">Algorithm</th>
+                <th className="py-3 px-4">Coin</th>
                 <th className="py-3 px-4">Hashrate</th>
                 <th className="py-3 px-4">Accepted</th>
                 <th className="py-3 px-4">Rejected</th>
                 <th className="py-3 px-4">Reject %</th>
                 <th className="py-3 px-4">Uptime</th>
+                <th className="py-3 px-4 w-20"></th>
               </tr>
             </thead>
             <tbody>
-              {stats.length === 0 ? (
+              {config && config.coins.length > 0 ? (
+                config.coins.map((coin, i) => (
+                  <WorkerRow
+                    key={coin.symbol}
+                    coin={coin}
+                    stats={findStatsForCoin(coin)}
+                    running={workerStatus[coin.symbol] ?? false}
+                    powerState={resolvePowerState(i, coin)}
+                    powerError={powerErrors[i]}
+                    onEdit={() => setEditIndex(i)}
+                    onToggle={() => handleToggle(i, coin)}
+                  />
+                ))
+              ) : (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-[var(--color-text-secondary)]">
-                    No active workers
+                  <td
+                    colSpan={7}
+                    className="py-8 text-center text-[var(--color-text-secondary)]"
+                  >
+                    No workers configured
                   </td>
                 </tr>
-              ) : (
-                stats.map((s, i) => <WorkerRow key={i} stats={s} />)
               )}
             </tbody>
           </table>
@@ -139,6 +275,16 @@ export default function App() {
           ))}
         </div>
       </section>
+
+      {/* Edit Dialog */}
+      {editIndex !== null && config && (
+        <EditWorkerDialog
+          entry={config.coins[editIndex]}
+          index={editIndex}
+          onSave={handleSave}
+          onClose={() => setEditIndex(null)}
+        />
+      )}
     </div>
   );
 }

@@ -18,3 +18,23 @@ export interface PoolConfig {
   port: number;
   tls: boolean;
 }
+
+export interface CoinEntry {
+  symbol: string;
+  algorithm: string;
+  wallet: string;
+  pool: PoolConfig;
+  threads: number | null;
+  enabled: boolean;
+}
+
+export interface MinerConfig {
+  worker_name: string;
+  coins: CoinEntry[];
+  api: {
+    enabled: boolean;
+    host: string;
+    port: number;
+  };
+  log_level: string;
+}

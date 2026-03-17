@@ -234,6 +234,24 @@ impl WorkerManager {
     pub fn worker_count(&self) -> usize {
         self.workers.len()
     }
+
+    pub fn has_worker_for_symbol(&self, symbol: &str) -> bool {
+        self.workers.values().any(|h| h.coin_symbol == symbol)
+    }
+
+    pub async fn stop_worker_by_symbol(&mut self, symbol: &str) -> bool {
+        let id = self
+            .workers
+            .iter()
+            .find(|(_, h)| h.coin_symbol == symbol)
+            .map(|(id, _)| id.clone());
+
+        if let Some(id) = id {
+            self.stop_worker(&id).await
+        } else {
+            false
+        }
+    }
 }
 
 fn rand_nonce() -> u64 {
