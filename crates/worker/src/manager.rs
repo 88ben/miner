@@ -12,9 +12,12 @@ use miner_core::stats::{MinerStats, StatsSnapshot};
 use miner_core::types::MiningJob;
 use miner_hashers::factory::create_hasher;
 use miner_stratum::client::{PoolEvent, StratumClient};
-use miner_stratum::message::StratumRequest;
+use miner_stratum::message::{StratumDialect, StratumRequest};
 
-use crate::engine::{FoundShare, MiningEngine};
+use crate::engine::{MiningEngine, MiningEvent};
+
+const RECONNECT_BASE_DELAY_SECS: u64 = 5;
+const RECONNECT_MAX_DELAY_SECS: u64 = 60;
 
 pub struct WorkerManager {
     workers: HashMap<String, WorkerHandle>,
@@ -50,11 +53,10 @@ impl WorkerManager {
         let symbol = coin.symbol.clone();
         let stats = self.stats.clone();
         let wid = worker_id.clone();
+        let dialect = dialect_for_algorithm(algorithm);
 
-        // Create the hasher for this algorithm
         let hasher = create_hasher(algorithm)?;
 
-        // Create the mining engine
         let engine = MiningEngine::new(hasher);
         let engine_stop = engine.stop_handle();
         let engine_stop_clone = engine_stop.clone();
@@ -64,132 +66,189 @@ impl WorkerManager {
             s.insert(wid.clone(), MinerStats::new(algorithm));
         }
 
-        // Share submission channel
-        let (share_tx, mut share_rx) = mpsc::unbounded_channel::<FoundShare>();
+        let (event_tx, mut event_rx_mine) = mpsc::unbounded_channel::<MiningEvent>();
 
         tokio::spawn(async move {
             info!(
                 worker_id = %wid,
                 coin = %symbol,
                 algo = %algorithm,
+                dialect = ?dialect,
                 "Worker starting"
             );
 
-            let mut client = StratumClient::new(pool_addr, wallet, "x".into());
+            let wallet_for_submit = wallet.clone();
+            let mut reconnect_delay = RECONNECT_BASE_DELAY_SECS;
 
-            match client.connect().await {
-                Ok((submit_tx, mut event_rx)) => {
-                    let mut _current_job: Option<MiningJob> = None;
-                    let mut mining_active = false;
+            loop {
+                let mut client = StratumClient::new(
+                    pool_addr.clone(),
+                    wallet.clone(),
+                    "x".into(),
+                    dialect,
+                );
 
-                    loop {
-                        tokio::select! {
-                            Some(event) = event_rx.recv() => {
-                                match event {
-                                    PoolEvent::NewJob(job) => {
-                                        info!(
-                                            worker_id = %wid,
-                                            job_id = %job.job_id,
-                                            "New job received"
-                                        );
+                match client.connect().await {
+                    Ok((submit_tx, mut pool_rx)) => {
+                        reconnect_delay = RECONNECT_BASE_DELAY_SECS;
+                        let mut _current_job: Option<MiningJob> = None;
+                        let mut mining_active = false;
 
-                                        // Stop any active mining
-                                        engine_stop.store(false, Ordering::Relaxed);
+                        loop {
+                            tokio::select! {
+                                Some(pool_event) = pool_rx.recv() => {
+                                    match pool_event {
+                                        PoolEvent::NewJob(job) => {
+                                            info!(
+                                                worker_id = %wid,
+                                                job_id = %job.job_id,
+                                                "New job received"
+                                            );
 
-                                        _current_job = Some(job.clone());
+                                            engine_stop.store(false, Ordering::Relaxed);
+                                            _current_job = Some(job.clone());
 
-                                        // Start mining on a blocking thread
-                                        if !mining_active {
-                                            let share_tx_clone = share_tx.clone();
-                                            let _stats_clone = stats.clone();
-                                            let wid_clone = wid.clone();
-                                            let engine_ref_stop = engine_stop.clone();
+                                            if !mining_active {
+                                                let etx = event_tx.clone();
+                                                let wid_clone = wid.clone();
+                                                let engine_ref_stop = engine_stop.clone();
 
-                                            mining_active = true;
-                                            let job_for_task = job;
+                                                mining_active = true;
+                                                let job_for_task = job;
 
-                                            tokio::task::spawn_blocking(move || {
-                                                engine_ref_stop.store(true, Ordering::Relaxed);
+                                                tokio::task::spawn_blocking(move || {
+                                                    engine_ref_stop.store(true, Ordering::Relaxed);
 
-                                                // Create a new engine for this thread
-                                                match create_hasher(algorithm) {
-                                                    Ok(hasher) => {
-                                                        let engine = MiningEngine::new(hasher);
-                                                        let start_nonce = rand_nonce();
-                                                        if let Err(e) = engine.mine(
-                                                            job_for_task,
-                                                            start_nonce,
-                                                            share_tx_clone,
-                                                        ) {
+                                                    match create_hasher(algorithm) {
+                                                        Ok(hasher) => {
+                                                            let engine = MiningEngine::new(hasher);
+                                                            let start_nonce = rand_nonce();
+                                                            if let Err(e) = engine.mine(
+                                                                job_for_task,
+                                                                start_nonce,
+                                                                etx,
+                                                            ) {
+                                                                error!(
+                                                                    worker_id = %wid_clone,
+                                                                    error = %e,
+                                                                    "Mining error"
+                                                                );
+                                                            }
+                                                        }
+                                                        Err(e) => {
                                                             error!(
                                                                 worker_id = %wid_clone,
                                                                 error = %e,
-                                                                "Mining error"
+                                                                "Failed to create hasher"
                                                             );
                                                         }
                                                     }
-                                                    Err(e) => {
-                                                        error!(
-                                                            worker_id = %wid_clone,
-                                                            error = %e,
-                                                            "Failed to create hasher"
-                                                        );
-                                                    }
+                                                });
+                                            }
+                                        }
+                                        PoolEvent::Accepted => {
+                                            let mut s = stats.write().await;
+                                            if let Some(worker_stats) = s.get_mut(&wid) {
+                                                worker_stats.record_share(true);
+                                            }
+                                            info!(worker_id = %wid, "Share accepted");
+                                        }
+                                        PoolEvent::Rejected(reason) => {
+                                            let mut s = stats.write().await;
+                                            if let Some(worker_stats) = s.get_mut(&wid) {
+                                                worker_stats.record_share(false);
+                                            }
+                                            warn!(worker_id = %wid, reason = %reason, "Share rejected");
+                                        }
+                                        PoolEvent::Disconnected => {
+                                            warn!(worker_id = %wid, "Disconnected from pool, will reconnect");
+                                            engine_stop.store(false, Ordering::Relaxed);
+                                            break;
+                                        }
+                                    }
+                                }
+                                Some(mining_event) = event_rx_mine.recv() => {
+                                    match mining_event {
+                                        MiningEvent::Share { job_id, nonce, hash, ntime, extranonce2_size } => {
+                                            let req = match dialect {
+                                                StratumDialect::CryptoNote => {
+                                                    let nonce_hex = format!("{:016x}", nonce);
+                                                    let result_hex = hex::encode(&hash);
+                                                    StratumRequest::submit(
+                                                        &job_id,
+                                                        &nonce_hex,
+                                                        &result_hex,
+                                                        1,
+                                                    )
                                                 }
-                                            });
+                                                StratumDialect::Ethash => {
+                                                    let nonce_hex = format!("0x{:016x}", nonce);
+                                                    let header_hex = format!("0x{}", &job_id);
+                                                    let mix_hex = format!("0x{}", hex::encode(&hash));
+                                                    StratumRequest::eth_submit_work(
+                                                        &nonce_hex,
+                                                        &header_hex,
+                                                        &mix_hex,
+                                                        1,
+                                                    )
+                                                }
+                                                StratumDialect::Stratum => {
+                                                    let ntime_str = ntime.as_deref().unwrap_or("00000000");
+                                                    let en2_size = extranonce2_size.unwrap_or(4);
+                                                    let nonce_le = nonce.to_le_bytes();
+                                                    let en2_hex = hex::encode(&nonce_le[..en2_size.min(8)]);
+                                                    let solution_hex = hex::encode(&hash);
+                                                    StratumRequest::mining_submit(
+                                                        &wallet_for_submit,
+                                                        &job_id,
+                                                        ntime_str,
+                                                        &en2_hex,
+                                                        &solution_hex,
+                                                        1,
+                                                    )
+                                                }
+                                            };
+                                            if let Err(e) = submit_tx.send(req).await {
+                                                error!(worker_id = %wid, error = %e, "Failed to submit share");
+                                            }
+                                        }
+                                        MiningEvent::HashReport(count) => {
+                                            let mut s = stats.write().await;
+                                            if let Some(worker_stats) = s.get_mut(&wid) {
+                                                worker_stats.record_hashes(count);
+                                            }
                                         }
                                     }
-                                    PoolEvent::Accepted => {
-                                        let mut s = stats.write().await;
-                                        if let Some(worker_stats) = s.get_mut(&wid) {
-                                            worker_stats.record_share(true);
-                                        }
-                                        info!(worker_id = %wid, "Share accepted");
-                                    }
-                                    PoolEvent::Rejected(reason) => {
-                                        let mut s = stats.write().await;
-                                        if let Some(worker_stats) = s.get_mut(&wid) {
-                                            worker_stats.record_share(false);
-                                        }
-                                        warn!(worker_id = %wid, reason = %reason, "Share rejected");
-                                    }
-                                    PoolEvent::Disconnected => {
-                                        info!(worker_id = %wid, "Disconnected from pool");
-                                        engine_stop.store(false, Ordering::Relaxed);
-                                        break;
-                                    }
                                 }
-                            }
-                            Some(share) = share_rx.recv() => {
-                                // Submit the found share to the pool
-                                let nonce_hex = format!("{:016x}", share.nonce);
-                                let result_hex = hex::encode(&share.hash);
-                                let req = StratumRequest::submit(
-                                    &share.job_id,
-                                    &nonce_hex,
-                                    &result_hex,
-                                    1,
-                                );
-                                if let Err(e) = submit_tx.send(req).await {
-                                    error!(worker_id = %wid, error = %e, "Failed to submit share");
+                                _ = shutdown_rx.recv() => {
+                                    info!(worker_id = %wid, "Worker shutting down");
+                                    engine_stop.store(false, Ordering::Relaxed);
+                                    return;
                                 }
-
-                                let mut s = stats.write().await;
-                                if let Some(worker_stats) = s.get_mut(&wid) {
-                                    worker_stats.record_hashes(1);
-                                }
-                            }
-                            _ = shutdown_rx.recv() => {
-                                info!(worker_id = %wid, "Worker shutting down");
-                                engine_stop.store(false, Ordering::Relaxed);
-                                break;
                             }
                         }
                     }
+                    Err(e) => {
+                        error!(worker_id = %wid, error = %e, "Failed to connect to pool");
+                    }
                 }
-                Err(e) => {
-                    error!(worker_id = %wid, error = %e, "Failed to connect to pool");
+
+                // Reconnect with backoff
+                info!(
+                    worker_id = %wid,
+                    delay_secs = reconnect_delay,
+                    "Reconnecting to pool"
+                );
+
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(reconnect_delay)) => {}
+                    _ = shutdown_rx.recv() => {
+                        info!(worker_id = %wid, "Worker shutting down during reconnect");
+                        return;
+                    }
                 }
+
+                reconnect_delay = (reconnect_delay * 2).min(RECONNECT_MAX_DELAY_SECS);
             }
         });
 
@@ -251,6 +310,16 @@ impl WorkerManager {
         } else {
             false
         }
+    }
+}
+
+fn dialect_for_algorithm(algo: Algorithm) -> StratumDialect {
+    match algo {
+        Algorithm::RandomX => StratumDialect::CryptoNote,
+        Algorithm::EtcHash => StratumDialect::Ethash,
+        Algorithm::KawPow => StratumDialect::Stratum,
+        Algorithm::KHeavyHash => StratumDialect::Stratum,
+        Algorithm::Equihash => StratumDialect::Stratum,
     }
 }
 

@@ -1,5 +1,6 @@
 import type { CoinEntry, StatsSnapshot } from "../types";
 import { formatHashrate, formatUptime } from "../utils";
+import { CoinIcon } from "./CoinIcon";
 import { PowerButton, type PowerState } from "./PowerButton";
 
 interface WorkerRowProps {
@@ -8,6 +9,7 @@ interface WorkerRowProps {
   running: boolean;
   powerState: PowerState;
   powerError?: string;
+  disabledReason?: string;
   onEdit: () => void;
   onToggle: () => void;
 }
@@ -18,6 +20,7 @@ export function WorkerRow({
   running,
   powerState,
   powerError,
+  disabledReason,
   onEdit,
   onToggle,
 }: WorkerRowProps) {
@@ -28,18 +31,23 @@ export function WorkerRow({
   return (
     <tr className="border-b border-[var(--color-border)] hover:bg-[var(--color-bg-secondary)] transition-colors">
       <td className="py-3 px-4">
-        <div className="flex items-center gap-2">
-          <span
-            className={`inline-block w-2 h-2 rounded-full ${
-              running
-                ? "bg-[var(--color-success)]"
-                : "bg-[var(--color-text-secondary)]"
-            }`}
-          />
-          <span className="font-medium">{coin.symbol}</span>
-          <span className="text-[var(--color-text-secondary)] text-xs">
-            {coin.algorithm}
-          </span>
+        <div className="flex items-center gap-3">
+          <div className="relative flex-shrink-0">
+            <CoinIcon symbol={coin.symbol} size={24} />
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[var(--color-bg-card)] ${
+                running
+                  ? "bg-[var(--color-success)]"
+                  : "bg-[var(--color-text-secondary)]"
+              }`}
+            />
+          </div>
+          <div className="flex flex-col">
+            <span className="font-medium leading-tight">{coin.symbol}</span>
+            <span className="text-[var(--color-text-secondary)] text-xs leading-tight">
+              {coin.algorithm}
+            </span>
+          </div>
         </div>
       </td>
       <td className="py-3 px-4 text-[var(--color-accent)] font-mono font-bold">
@@ -62,7 +70,7 @@ export function WorkerRow({
           <button
             onClick={onEdit}
             className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-white
-                       hover:bg-[var(--color-bg-secondary)] transition-colors"
+                       hover:bg-[var(--color-bg-secondary)] transition-colors cursor-pointer"
             title={`Edit ${coin.symbol} worker`}
           >
             <svg
@@ -79,6 +87,7 @@ export function WorkerRow({
             onClick={onToggle}
             symbol={coin.symbol}
             errorMsg={powerError}
+            disabledReason={disabledReason}
           />
         </div>
       </td>

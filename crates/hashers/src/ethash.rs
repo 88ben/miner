@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use byteorder::{ByteOrder, LittleEndian};
 use sha3::{Digest, Keccak256, Keccak512};
 use tracing::{debug, info};
@@ -19,43 +21,69 @@ const ACCESSES: usize = 64;
 // ETCHash uses epoch length 60000 (vs Ethash 30000)
 const EPOCH_LENGTH: u64 = 60000;
 
-pub struct EthashHasher {
-    epoch: Option<u64>,
+struct EpochCache {
+    epoch: u64,
     cache: Vec<u8>,
     cache_size: usize,
     full_size: usize,
 }
 
+pub struct EthashHasher {
+    state: Mutex<Option<EpochCache>>,
+}
+
 impl EthashHasher {
     pub fn new() -> Self {
         Self {
-            epoch: None,
-            cache: Vec::new(),
-            cache_size: 0,
-            full_size: 0,
+            state: Mutex::new(None),
         }
     }
 
-    fn setup_epoch(&mut self, block_number: u64) -> Result<()> {
-        let epoch = block_number / EPOCH_LENGTH;
-        if self.epoch == Some(epoch) {
-            return Ok(());
+    fn ensure_epoch(&self, job: &MiningJob) -> Result<()> {
+        let epoch = if let Some(seed) = &job.seed_hash {
+            epoch_from_seed(seed)
+        } else if let Some(height) = job.height {
+            height / EPOCH_LENGTH
+        } else {
+            return Err(MinerError::Hardware(
+                "Cannot determine epoch: no seed_hash or height".into(),
+            ));
+        };
+
+        let mut guard = self.state.lock().unwrap();
+        if let Some(ref s) = *guard {
+            if s.epoch == epoch {
+                return Ok(());
+            }
         }
-        info!(epoch, block_number, "Generating ethash cache for epoch");
 
-        self.cache_size = get_cache_size(epoch);
-        self.full_size = get_full_size(epoch);
+        info!(epoch, "Generating ethash cache for epoch");
 
+        let cache_size = get_cache_size(epoch);
+        let full_size = get_full_size(epoch);
         let seed = get_seedhash(epoch);
-        self.cache = make_cache(self.cache_size, &seed);
-        self.epoch = Some(epoch);
+        let cache = make_cache(cache_size, &seed);
 
-        debug!(
-            cache_size = self.cache_size,
-            full_size = self.full_size,
-            "Ethash epoch initialized"
-        );
+        debug!(cache_size, full_size, "Ethash epoch initialized");
+
+        *guard = Some(EpochCache {
+            epoch,
+            cache,
+            cache_size,
+            full_size,
+        });
+
         Ok(())
+    }
+
+    fn with_cache<T>(&self, f: impl FnOnce(&EpochCache) -> Result<T>) -> Result<T> {
+        let guard = self.state.lock().unwrap();
+        match &*guard {
+            Some(s) => f(s),
+            None => Err(MinerError::Hardware(
+                "Ethash cache not initialized".into(),
+            )),
+        }
     }
 }
 
@@ -69,22 +97,18 @@ impl Hasher for EthashHasher {
     }
 
     fn hash(&self, job: &MiningJob, nonce: Nonce) -> Result<Vec<u8>> {
-        if self.cache.is_empty() {
-            return Err(MinerError::Hardware(
-                "Ethash cache not initialized; need block height".into(),
-            ));
-        }
+        self.ensure_epoch(job)?;
+        self.with_cache(|s| {
+            let header_hash: [u8; 32] = job
+                .blob
+                .as_slice()
+                .try_into()
+                .map_err(|_| MinerError::Hardware("Invalid header hash length".into()))?;
 
-        let header_hash: [u8; 32] = job
-            .blob
-            .as_slice()
-            .try_into()
-            .map_err(|_| MinerError::Hardware("Invalid header hash length".into()))?;
-
-        let (mix, result) =
-            hashimoto_light(self.full_size, &self.cache, &header_hash, nonce.0);
-        let _ = mix; // mix_hash is used for share submission
-        Ok(result.to_vec())
+            let (_mix, result) =
+                hashimoto_light(s.full_size, &s.cache, &header_hash, nonce.0);
+            Ok(result.to_vec())
+        })
     }
 
     fn hash_batch(
@@ -93,34 +117,30 @@ impl Hasher for EthashHasher {
         start_nonce: u64,
         batch_size: u64,
     ) -> Result<Vec<FoundNonce>> {
-        if self.cache.is_empty() {
-            return Err(MinerError::Hardware(
-                "Ethash cache not initialized; need block height".into(),
-            ));
-        }
+        self.ensure_epoch(job)?;
+        self.with_cache(|s| {
+            let header_hash: [u8; 32] = job
+                .blob
+                .as_slice()
+                .try_into()
+                .map_err(|_| MinerError::Hardware("Invalid header hash length".into()))?;
 
-        let header_hash: [u8; 32] = job
-            .blob
-            .as_slice()
-            .try_into()
-            .map_err(|_| MinerError::Hardware("Invalid header hash length".into()))?;
-
-        let mut found = Vec::new();
-        for i in 0..batch_size {
-            let n = start_nonce.wrapping_add(i);
-            let (_mix, result) = hashimoto_light(self.full_size, &self.cache, &header_hash, n);
-            if self.meets_target(&result, &job.target) {
-                found.push(FoundNonce {
-                    nonce: n,
-                    hash: result.to_vec(),
-                });
+            let mut found = Vec::new();
+            for i in 0..batch_size {
+                let n = start_nonce.wrapping_add(i);
+                let (_mix, result) = hashimoto_light(s.full_size, &s.cache, &header_hash, n);
+                if self.meets_target(&result, &job.target) {
+                    found.push(FoundNonce {
+                        nonce: n,
+                        hash: result.to_vec(),
+                    });
+                }
             }
-        }
-        Ok(found)
+            Ok(found)
+        })
     }
 
     fn meets_target(&self, hash: &[u8], target: &[u8]) -> bool {
-        // Big-endian comparison
         for (h, t) in hash.iter().zip(target.iter()) {
             if h < t {
                 return true;
@@ -135,6 +155,18 @@ impl Hasher for EthashHasher {
     fn preferred_batch_size(&self) -> u64 {
         1024
     }
+}
+
+fn epoch_from_seed(seed: &[u8]) -> u64 {
+    let mut current = [0u8; 32];
+    for epoch in 0..2048 {
+        if current == seed[..32] {
+            return epoch;
+        }
+        let hash = Keccak256::digest(&current);
+        current.copy_from_slice(&hash);
+    }
+    0
 }
 
 fn is_prime(n: usize) -> bool {
@@ -188,7 +220,6 @@ fn make_cache(cache_size: usize, seed: &[u8; 32]) -> Vec<u8> {
     let n = cache_size / HASH_BYTES;
     let mut cache = vec![0u8; cache_size];
 
-    // Sequentially produce initial dataset
     let hash = Keccak512::digest(seed);
     cache[..HASH_BYTES].copy_from_slice(&hash);
     for i in 1..n {
@@ -252,7 +283,6 @@ fn hashimoto_light(
     let n = full_size / HASH_BYTES;
     let w = MIX_BYTES / WORD_BYTES;
 
-    // Combine header+nonce
     let mut s_input = Vec::with_capacity(40);
     s_input.extend_from_slice(header);
     s_input.extend_from_slice(&nonce.to_le_bytes());
@@ -282,7 +312,6 @@ fn hashimoto_light(
         }
     }
 
-    // Compress mix
     let mut cmix = [0u8; 32];
     for i in 0..8 {
         let offset = i * 4 * WORD_BYTES;
@@ -293,7 +322,6 @@ fn hashimoto_light(
         LittleEndian::write_u32(&mut cmix[i * 4..], val);
     }
 
-    // Result
     let mut result_input = Vec::with_capacity(64 + 32);
     result_input.extend_from_slice(&s_bytes);
     result_input.extend_from_slice(&cmix);
@@ -309,7 +337,6 @@ fn fnv(v1: u32, v2: u32) -> u32 {
 }
 
 fn fnv_byte(v1: u8, v2: u8) -> u8 {
-    // FNV operates on 32-bit words; for byte-level mixing we use the same idea
     let r = fnv(v1 as u32, v2 as u32);
     r as u8
 }

@@ -31,6 +31,10 @@ pub struct MiningJob {
     pub target: Vec<u8>,
     pub difficulty: f64,
     pub height: Option<u64>,
+    pub seed_hash: Option<Vec<u8>>,
+    pub ntime: Option<String>,
+    pub extranonce1: Option<Vec<u8>>,
+    pub extranonce2_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
 import {
-  fetchCoins,
   fetchConfig,
   fetchStats,
   fetchWorkerStatus,
@@ -9,12 +8,11 @@ import {
   stopAllWorkers,
   updateCoinEntry,
 } from "./api";
-import { CoinBadge } from "./components/CoinBadge";
 import { EditWorkerDialog } from "./components/EditWorkerDialog";
 import type { PowerState } from "./components/PowerButton";
 import { StatCard } from "./components/StatCard";
 import { WorkerRow } from "./components/WorkerRow";
-import type { Coin, CoinEntry, MinerConfig, StatsSnapshot } from "./types";
+import type { CoinEntry, MinerConfig, StatsSnapshot } from "./types";
 import { formatHashrate } from "./utils";
 
 const POLL_INTERVAL = 2000;
@@ -28,9 +26,20 @@ function isCoinConfigured(coin: CoinEntry): boolean {
   );
 }
 
+function getDisabledReason(coin: CoinEntry): string | undefined {
+  if (!coin.wallet || coin.wallet.length === 0)
+    return "No wallet address set";
+  if (coin.wallet.startsWith("YOUR_"))
+    return "Wallet address is still a placeholder";
+  if (!coin.pool.url || coin.pool.url.length === 0)
+    return "No pool URL set";
+  if (!coin.pool.port || coin.pool.port <= 0)
+    return "No pool port set";
+  return undefined;
+}
+
 export default function App() {
   const [stats, setStats] = useState<StatsSnapshot[]>([]);
-  const [coins, setCoins] = useState<Coin[]>([]);
   const [config, setConfig] = useState<MinerConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -50,7 +59,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchCoins().then(setCoins).catch(() => {});
     fetchConfig().then(setConfig).catch(() => {});
     refreshStatus();
 
@@ -247,6 +255,7 @@ export default function App() {
                     running={workerStatus[coin.symbol] ?? false}
                     powerState={resolvePowerState(i, coin)}
                     powerError={powerErrors[i]}
+                    disabledReason={getDisabledReason(coin)}
                     onEdit={() => setEditIndex(i)}
                     onToggle={() => handleToggle(i, coin)}
                   />
@@ -263,16 +272,6 @@ export default function App() {
               )}
             </tbody>
           </table>
-        </div>
-      </section>
-
-      {/* Supported Coins */}
-      <section className="rounded-xl bg-[var(--color-bg-card)] border border-[var(--color-border)] p-5">
-        <h2 className="text-lg font-semibold mb-4">Supported Coins</h2>
-        <div className="flex flex-wrap gap-3">
-          {coins.map((c) => (
-            <CoinBadge key={c.symbol} coin={c} />
-          ))}
         </div>
       </section>
 

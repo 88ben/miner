@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// JSON-RPC request sent to the pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StratumDialect {
+    CryptoNote,
+    Ethash,
+    Stratum,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StratumRequest {
     pub id: u64,
@@ -8,7 +14,6 @@ pub struct StratumRequest {
     pub params: serde_json::Value,
 }
 
-/// JSON-RPC response from the pool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StratumResponse {
     pub id: Option<u64>,
@@ -20,13 +25,6 @@ pub struct StratumResponse {
 pub struct StratumError {
     pub code: i32,
     pub message: String,
-}
-
-/// Notifications pushed by the pool (new jobs, difficulty changes, etc).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StratumNotification {
-    pub method: String,
-    pub params: serde_json::Value,
 }
 
 impl StratumRequest {
@@ -42,6 +40,30 @@ impl StratumRequest {
         }
     }
 
+    pub fn eth_submit_login(wallet: &str, pass: &str, id: u64) -> Self {
+        Self {
+            id,
+            method: "eth_submitLogin".into(),
+            params: serde_json::json!([wallet, pass]),
+        }
+    }
+
+    pub fn mining_subscribe(agent: &str, id: u64) -> Self {
+        Self {
+            id,
+            method: "mining.subscribe".into(),
+            params: serde_json::json!([agent]),
+        }
+    }
+
+    pub fn mining_authorize(wallet: &str, pass: &str, id: u64) -> Self {
+        Self {
+            id,
+            method: "mining.authorize".into(),
+            params: serde_json::json!([wallet, pass]),
+        }
+    }
+
     pub fn submit(job_id: &str, nonce: &str, result: &str, id: u64) -> Self {
         Self {
             id,
@@ -51,6 +73,29 @@ impl StratumRequest {
                 "nonce": nonce,
                 "result": result,
             }),
+        }
+    }
+
+    pub fn eth_submit_work(nonce: &str, header: &str, mix_digest: &str, id: u64) -> Self {
+        Self {
+            id,
+            method: "eth_submitWork".into(),
+            params: serde_json::json!([nonce, header, mix_digest]),
+        }
+    }
+
+    pub fn mining_submit(
+        worker: &str,
+        job_id: &str,
+        ntime: &str,
+        nonce_hex: &str,
+        solution_hex: &str,
+        id: u64,
+    ) -> Self {
+        Self {
+            id,
+            method: "mining.submit".into(),
+            params: serde_json::json!([worker, job_id, ntime, nonce_hex, solution_hex]),
         }
     }
 }

@@ -5,9 +5,10 @@ interface PowerButtonProps {
   onClick: () => void;
   symbol: string;
   errorMsg?: string;
+  disabledReason?: string;
 }
 
-export function PowerButton({ state, onClick, symbol, errorMsg }: PowerButtonProps) {
+export function PowerButton({ state, onClick, symbol, errorMsg, disabledReason }: PowerButtonProps) {
   const config: Record<
     PowerState,
     { title: string; color: string; hoverColor: string; cursor: string }
@@ -31,7 +32,7 @@ export function PowerButton({ state, onClick, symbol, errorMsg }: PowerButtonPro
       cursor: "cursor-pointer",
     },
     disabled: {
-      title: `${symbol} not configured — set wallet & pool first`,
+      title: disabledReason || `${symbol} not configured`,
       color: "text-[var(--color-text-secondary)] opacity-30",
       hoverColor: "",
       cursor: "cursor-not-allowed",
@@ -48,12 +49,15 @@ export function PowerButton({ state, onClick, symbol, errorMsg }: PowerButtonPro
   const isClickable = state === "off" || state === "on" || state === "error";
 
   return (
+    <span
+      className={state === "disabled" ? "cursor-not-allowed" : ""}
+      title={state === "disabled" ? c.title : undefined}
+    >
     <button
       onClick={isClickable ? onClick : undefined}
       disabled={!isClickable}
-      className={`p-1.5 rounded-md transition-colors ${c.color} ${c.hoverColor} ${c.cursor}
-                  disabled:pointer-events-none`}
-      title={c.title}
+      className={`p-1.5 rounded-md transition-colors ${c.color} ${c.hoverColor} ${c.cursor}`}
+      title={state !== "disabled" ? c.title : undefined}
     >
       {state === "loading" ? <SpinnerIcon /> : null}
       {state === "off" ? <PowerOnIcon /> : null}
@@ -61,6 +65,7 @@ export function PowerButton({ state, onClick, symbol, errorMsg }: PowerButtonPro
       {state === "disabled" ? <PowerDisabledIcon /> : null}
       {state === "error" ? <ErrorIcon /> : null}
     </button>
+    </span>
   );
 }
 

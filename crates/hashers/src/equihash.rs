@@ -32,13 +32,23 @@ impl Hasher for EquihashSolver {
     fn hash(&self, job: &MiningJob, nonce: Nonce) -> Result<Vec<u8>> {
         let input = job.blob.clone();
 
-        // Build a nonce as a 32-byte LE array
         let mut nonce_bytes = [0u8; NONCE_SIZE];
-        let le = nonce.0.to_le_bytes();
-        nonce_bytes[..le.len()].copy_from_slice(&le);
 
-        // The tromp solver takes a closure that produces nonces to try.
-        // We give it exactly one nonce.
+        // If we have extranonce1 from the pool, place it at the start of the nonce
+        let en2_offset = if let Some(ref en1) = job.extranonce1 {
+            let len = en1.len().min(NONCE_SIZE);
+            nonce_bytes[..len].copy_from_slice(&en1[..len]);
+            len
+        } else {
+            0
+        };
+
+        // Fill the rest with our extranonce2 (derived from the nonce counter)
+        let en2_size = job.extranonce2_size.unwrap_or(NONCE_SIZE - en2_offset);
+        let le = nonce.0.to_le_bytes();
+        let copy_len = le.len().min(en2_size).min(NONCE_SIZE - en2_offset);
+        nonce_bytes[en2_offset..en2_offset + copy_len].copy_from_slice(&le[..copy_len]);
+
         let mut used = false;
         let next_nonce = || {
             if !used {
@@ -61,12 +71,10 @@ impl Hasher for EquihashSolver {
             }
         }
 
-        // No solution found for this nonce
         Ok(Vec::new())
     }
 
     fn meets_target(&self, hash: &[u8], _target: &[u8]) -> bool {
-        // A non-empty solution is a valid share
         !hash.is_empty()
     }
 
