@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   fetchConfig,
   fetchStats,
@@ -43,6 +43,7 @@ export default function App() {
   const [config, setConfig] = useState<MinerConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [startingAll, setStartingAll] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
 
   const [workerStatus, setWorkerStatus] = useState<Record<string, boolean>>({});
@@ -58,25 +59,25 @@ export default function App() {
     }
   }, []);
 
+  const refreshDashboard = useCallback(async () => {
+    try {
+      const data = await fetchStats();
+      setStats(data);
+      setError(null);
+    } catch {
+      setError("Cannot reach miner API");
+    }
+    await refreshStatus();
+  }, [refreshStatus]);
+
   useEffect(() => {
     fetchConfig().then(setConfig).catch(() => {});
     refreshStatus();
+    refreshDashboard();
 
-    const poll = () => {
-      fetchStats()
-        .then((data) => {
-          setStats(data);
-          setError(null);
-        })
-        .catch(() => setError("Cannot reach miner API"));
-
-      refreshStatus();
-    };
-
-    poll();
-    const interval = setInterval(poll, POLL_INTERVAL);
+    const interval = setInterval(refreshDashboard, POLL_INTERVAL);
     return () => clearInterval(interval);
-  }, [refreshStatus]);
+  }, [refreshStatus, refreshDashboard]);
 
   const totalHashrate = stats.reduce((sum, s) => sum + s.hashrate, 0);
   const totalAccepted = stats.reduce((sum, s) => sum + s.accepted_shares, 0);
@@ -89,6 +90,69 @@ export default function App() {
       await refreshStatus();
     } finally {
       setStopping(false);
+    }
+  };
+
+  const handleStartAll = async () => {
+    if (!config) return;
+    const toStart = config.coins
+      .map((coin, index) => ({ coin, index }))
+      .filter(
+        ({ coin }) =>
+          isCoinConfigured(coin) && !(workerStatus[coin.symbol] ?? false)
+      )
+      .map(({ index }) => index);
+
+    if (toStart.length === 0) return;
+
+    setStartingAll(true);
+    setPowerStates((p) => {
+      const next = { ...p };
+      for (const i of toStart) next[i] = "loading";
+      return next;
+    });
+
+    try {
+      const results = await Promise.all(
+        toStart.map(async (index) => {
+          try {
+            const res = await startWorker(index);
+            return {
+              index,
+              ok: res.ok,
+              error: res.ok ? undefined : res.error ?? "Unknown error",
+            };
+          } catch (err) {
+            return {
+              index,
+              ok: false,
+              error:
+                err instanceof Error ? err.message : "Failed to start worker",
+            };
+          }
+        })
+      );
+
+      await refreshStatus();
+
+      setPowerStates((p) => {
+        const next = { ...p };
+        for (const r of results) {
+          if (r.ok) delete next[r.index];
+          else next[r.index] = "error";
+        }
+        return next;
+      });
+      setPowerErrors((e) => {
+        const next = { ...e };
+        for (const r of results) {
+          if (r.ok) delete next[r.index];
+          else if (r.error) next[r.index] = r.error;
+        }
+        return next;
+      });
+    } finally {
+      setStartingAll(false);
     }
   };
 
@@ -171,26 +235,37 @@ export default function App() {
     return running ? "on" : "off";
   };
 
+  const configuredCoins = config?.coins.filter(isCoinConfigured) ?? [];
+  const allConfiguredRunning =
+    configuredCoins.length > 0 &&
+    configuredCoins.every((coin) => workerStatus[coin.symbol] === true);
+  const startAllDisabled =
+    startingAll || !config || configuredCoins.length === 0 || allConfiguredRunning;
+
+  const sortedWorkerRows = useMemo(() => {
+    if (!config) return [];
+    return config.coins
+      .map((coin, configIndex) => ({ coin, configIndex }))
+      .sort((a, b) => {
+        const aActive = workerStatus[a.coin.symbol] ?? false;
+        const bActive = workerStatus[b.coin.symbol] ?? false;
+        if (aActive !== bActive) return aActive ? -1 : 1;
+        return a.coin.symbol.localeCompare(b.coin.symbol, undefined, {
+          sensitivity: "base",
+        });
+      });
+  }, [config, workerStatus]);
+
   return (
     <div className="min-h-screen p-6 max-w-6xl mx-auto">
       {/* Header */}
-      <header className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">
-            Miner Dashboard
-          </h1>
-          <p className="text-[var(--color-text-secondary)] text-sm mt-1">
-            Multi-cryptocurrency mining engine
-          </p>
-        </div>
-        <button
-          onClick={handleStopAll}
-          disabled={stopping || stats.length === 0}
-          className="px-4 py-2 rounded-lg bg-[var(--color-danger)] text-white font-medium text-sm
-                     hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {stopping ? "Stopping..." : "Stop All Workers"}
-        </button>
+      <header className="mb-8">
+        <h1 className="text-3xl font-bold tracking-tight">
+          Miner Dashboard
+        </h1>
+        <p className="text-[var(--color-text-secondary)] text-sm mt-1">
+          Multi-cryptocurrency mining engine
+        </p>
       </header>
 
       {error && (
@@ -229,8 +304,35 @@ export default function App() {
 
       {/* Workers Table */}
       <section className="rounded-xl bg-[var(--color-bg-card)] border border-[var(--color-border)] overflow-hidden mb-8">
-        <div className="px-5 py-4 border-b border-[var(--color-border)]">
+        <div className="px-5 py-4 border-b border-[var(--color-border)] flex items-center justify-between gap-4">
           <h2 className="text-lg font-semibold">Workers</h2>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleStartAll}
+              disabled={startAllDisabled}
+              title={
+                configuredCoins.length === 0
+                  ? "Configure wallet and pool for at least one worker"
+                  : allConfiguredRunning
+                    ? "All configured workers are already running"
+                    : "Start every configured worker that is not running"
+              }
+              className="px-3 py-1.5 rounded-lg bg-[var(--color-success)] text-white font-medium text-sm
+                         hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {startingAll ? "Starting..." : "Start All"}
+            </button>
+            <button
+              type="button"
+              onClick={handleStopAll}
+              disabled={stopping || stats.length === 0}
+              className="px-3 py-1.5 rounded-lg bg-[var(--color-danger)] text-white font-medium text-sm
+                         hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {stopping ? "Stopping..." : "Stop All"}
+            </button>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -246,8 +348,8 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              {config && config.coins.length > 0 ? (
-                config.coins.map((coin, i) => (
+              {sortedWorkerRows.length > 0 ? (
+                sortedWorkerRows.map(({ coin, configIndex: i }) => (
                   <WorkerRow
                     key={coin.symbol}
                     coin={coin}
